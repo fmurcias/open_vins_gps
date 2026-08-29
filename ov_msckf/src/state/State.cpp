@@ -130,6 +130,20 @@ State::State(StateOptions &options) {
     }
   }
 
+  // GPS antenna lever arm (p_ANTinI). Registered into the covariance only when estimated online,
+  // exactly like _calib_dt_CAMtoIMU; otherwise a fixed value VioManager sets from config.
+  _calib_GPStoIMU = std::make_shared<Vec>(3);
+  if (_options.do_calib_gps_leverarm) {
+    _calib_GPStoIMU->set_local_id(current_id);
+    _variables.push_back(_calib_GPStoIMU);
+    current_id += _calib_GPStoIMU->size();
+  }
+
+  // GPS local-ENU-to-global transform. Deliberately not added to _variables/covariance here (see
+  // State.h); allocated so delayed init has somewhere to park its linearization point beforehand.
+  _gps_yaw_EtoG = std::make_shared<Vec>(1);
+  _gps_pos_EinG = std::make_shared<Vec>(3);
+
   // Finally initialize our covariance to small value
   _Cov = std::pow(1e-3, 2) * Eigen::MatrixXd::Identity(current_id, current_id);
 
@@ -162,5 +176,9 @@ State::State(StateOptions &options) {
       _Cov.block(_cam_intrinsics.at(i)->id() + 4, _cam_intrinsics.at(i)->id() + 4, 4, 4) =
           std::pow(0.005, 2) * Eigen::MatrixXd::Identity(4, 4);
     }
+  }
+  if (_options.do_calib_gps_leverarm) {
+    // NOTE: VioManager overrides this with GPSOptions::leverarm_prior_std right after construction
+    _Cov.block(_calib_GPStoIMU->id(), _calib_GPStoIMU->id(), 3, 3) = std::pow(0.05, 2) * Eigen::Matrix3d::Identity();
   }
 }

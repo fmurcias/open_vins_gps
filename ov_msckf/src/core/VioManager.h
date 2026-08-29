@@ -26,12 +26,14 @@
 #include <algorithm>
 #include <atomic>
 #include <boost/filesystem.hpp>
+#include <deque>
 #include <fstream>
 #include <memory>
 #include <mutex>
 #include <string>
 
 #include "VioManagerOptions.h"
+#include "utils/sensor_data.h"
 
 namespace ov_core {
 struct ImuData;
@@ -50,6 +52,7 @@ class StateHelper;
 class UpdaterMSCKF;
 class UpdaterSLAM;
 class UpdaterZeroVelocity;
+class UpdaterGPS;
 class Propagator;
 
 /**
@@ -81,6 +84,16 @@ public:
   void feed_measurement_camera(const ov_core::CameraData &message) { track_image_and_update(message); }
 
   /**
+   * @brief Feed function for GPS fixes (already converted to the local ENU frame)
+   *
+   * Thread-safe: applies the fixed GPS-to-IMU time offset and enqueues for later draining on the
+   * camera thread. Non-monotonic fixes are dropped with a warning.
+   *
+   * @param message Contains the fix timestamp, ENU measurement, and its covariance
+   */
+  void feed_measurement_gps(const ov_core::GpsData &message);
+
+  /**
    * @brief Feed function for a synchronized simulated cameras
    * @param timestamp Time that this image was collected
    * @param camids Camera ids that we have simulated measurements for
@@ -109,6 +122,9 @@ public:
 
   /// Accessor to get the current propagator
   std::shared_ptr<Propagator> get_propagator() { return propagator; }
+
+  /// Accessor to get the GPS updater (nullptr unless params.gps.enabled)
+  std::shared_ptr<UpdaterGPS> get_updater_gps() { return updaterGPS; }
 
   /// Get a nice visualization image of what tracks we have
   cv::Mat get_historical_viz_image();
@@ -176,6 +192,18 @@ protected:
    */
   void retriangulate_active_tracks(const ov_core::CameraData &message);
 
+  /**
+   * @brief Drains queued GPS fixes up to t_cam_corrected, updating/initializing the state as needed.
+   *
+   * Called at the very start of track_image_and_update() and feed_measurement_simulation(), before
+   * ZUPT and feature tracking touch the state: UpdaterZeroVelocity::try_update() can jump
+   * state->_timestamp forward to t_cam, stranding any still-queued fix behind it.
+   * See docs/gps-fusion.md §9-10 for the clock domains and the per-fix decision order.
+   *
+   * @param t_cam_corrected Camera timestamp already shifted by calib_dt_CAMtoIMU (IMU clock frame)
+   */
+  void drain_gps_queue(double t_cam_corrected);
+
   /// Manager parameters
   VioManagerOptions params;
 
@@ -205,6 +233,18 @@ protected:
 
   /// Our zero velocity tracker
   std::shared_ptr<UpdaterZeroVelocity> updaterZUPT;
+
+  /// Our GPS updater (nullptr unless params.gps.enabled)
+  std::shared_ptr<UpdaterGPS> updaterGPS;
+
+  /// Queue of GPS fixes waiting to be drained on the camera thread, see drain_gps_queue()
+  std::deque<ov_core::GpsData> gps_queue;
+  std::mutex gps_queue_mtx;
+
+  /// Timestamp of the first GPS fix received (-1 until then), so the simulated outage window can be
+  /// expressed relative to the GPS stream rather than absolute epoch time. GPS callback thread only.
+  double gps_first_fix_timestamp = -1;
+  bool gps_in_dropout = false;
 
   /// This is the queue of measurement times that have come in since we starting doing initialization
   /// After we initialize, we will want to prop & update to the latest timestamp quickly

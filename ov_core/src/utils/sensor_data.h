@@ -47,6 +47,27 @@ struct ImuData {
 };
 
 /**
+ * @brief Struct for a single GPS measurement, already converted into the local ENU frame.
+ *
+ * LLA (WGS84) to ENU happens at the ROS layer (see gps_conv.h): the datum is a runtime choice the
+ * core estimator does not need to know about.
+ */
+struct GpsData {
+
+  /// Timestamp of the reading (already includes any fixed GPS-to-IMU offset correction)
+  double timestamp;
+
+  /// Antenna position measurement in the local ENU frame (meters)
+  Eigen::Matrix<double, 3, 1> meas_ENU;
+
+  /// Measurement covariance of meas_ENU (3x3, ENU frame, meters^2)
+  Eigen::Matrix<double, 3, 3> cov;
+
+  /// Sort function to allow for using of STL containers
+  bool operator<(const GpsData &other) const { return timestamp < other.timestamp; }
+};
+
+/**
  * @brief Struct for a collection of camera measurements.
  *
  * For each image we have a camera id and timestamp that it occured at.

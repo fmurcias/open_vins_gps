@@ -99,6 +99,20 @@ public:
                                      const std::vector<std::shared_ptr<ov_type::Type>> &order);
 
   /**
+   * @brief Adds a symmetric PSD matrix to the covariance blocks of the specified state elements.
+   *
+   * Unlike set_initial_covariance(), this preserves cross-covariances to variables outside `order`:
+   * it only makes the listed variables less certain, leaving their correlation structure intact. For
+   * uncertainty the filter did not model, e.g. drift across a sensor outage.
+   *
+   * @param state Pointer to state
+   * @param order Order of the variables the added matrix is expressed in
+   * @param add Symmetric PSD matrix to add, sized as the summed dimension of `order`
+   */
+  static void inflate_covariance(std::shared_ptr<State> state, const std::vector<std::shared_ptr<ov_type::Type>> &order,
+                                 const Eigen::MatrixXd &add);
+
+  /**
    * @brief For a given set of variables, this will this will calculate a smaller covariance.
    *
    * That only includes the ones specified with all crossterms.

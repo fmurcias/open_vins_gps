@@ -65,6 +65,7 @@ list(APPEND LIBRARY_SOURCES
         src/update/UpdaterMSCKF.cpp
         src/update/UpdaterSLAM.cpp
         src/update/UpdaterZeroVelocity.cpp
+        src/update/UpdaterGPS.cpp
 )
 list(APPEND LIBRARY_SOURCES src/ros/ROS2Visualizer.cpp src/ros/ROSVisualizerHelper.cpp)
 file(GLOB_RECURSE LIBRARY_HEADERS "src/*.h")
@@ -107,6 +108,27 @@ add_executable(test_sim_repeat src/test_sim_repeat.cpp)
 ament_target_dependencies(test_sim_repeat ${ament_libraries})
 target_link_libraries(test_sim_repeat ov_msckf_lib ${thirdparty_libraries})
 install(TARGETS test_sim_repeat DESTINATION lib/${PROJECT_NAME})
+
+add_executable(test_gps_jacobians src/test_gps_jacobians.cpp)
+ament_target_dependencies(test_gps_jacobians ${ament_libraries})
+target_link_libraries(test_gps_jacobians ov_msckf_lib ${thirdparty_libraries})
+install(TARGETS test_gps_jacobians DESTINATION lib/${PROJECT_NAME})
+
+add_executable(test_gps_clone_cycle src/test_gps_clone_cycle.cpp)
+ament_target_dependencies(test_gps_clone_cycle ${ament_libraries})
+target_link_libraries(test_gps_clone_cycle ov_msckf_lib ${thirdparty_libraries})
+install(TARGETS test_gps_clone_cycle DESTINATION lib/${PROJECT_NAME})
+
+add_executable(test_gps_sim src/test_gps_sim.cpp)
+target_compile_definitions(test_gps_sim PRIVATE OV_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../ov_data")
+ament_target_dependencies(test_gps_sim ${ament_libraries})
+target_link_libraries(test_gps_sim ov_msckf_lib ${thirdparty_libraries})
+install(TARGETS test_gps_sim DESTINATION lib/${PROJECT_NAME})
+
+add_executable(run_serial_kaist src/run_serial_kaist.cpp)
+ament_target_dependencies(run_serial_kaist ${ament_libraries})
+target_link_libraries(run_serial_kaist ov_msckf_lib ${thirdparty_libraries})
+install(TARGETS run_serial_kaist DESTINATION lib/${PROJECT_NAME})
 
 # Install launch and config directories
 install(DIRECTORY launch/ DESTINATION share/${PROJECT_NAME}/launch/)

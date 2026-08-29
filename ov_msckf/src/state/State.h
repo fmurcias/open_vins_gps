@@ -179,6 +179,26 @@ public:
   /// Rotation from accelerometer to the "IMU" gyroscope frame frame (rpng model)
   std::shared_ptr<ov_type::JPLQuat> _calib_imu_ACCtoIMU;
 
+  /**
+   * @brief GPS local-ENU-to-global yaw: R_EtoG = Rz(psi). Only 1 dof, since both frames are
+   * gravity-aligned.
+   *
+   * Unlike the calibration blocks above this is NOT registered into the covariance at construction:
+   * the transform is unobservable until GPS arrives, so UpdaterGPS delays its insertion. Until then
+   * the object exists (usable as a linearization point) but id() == -1.
+   */
+  std::shared_ptr<ov_type::Vec> _gps_yaw_EtoG;
+
+  /// GPS local-ENU origin expressed in the global frame, p_EinG (see note on _gps_yaw_EtoG above)
+  std::shared_ptr<ov_type::Vec> _gps_pos_EinG;
+
+  /// GPS antenna lever arm p_ANTinI. Registered into the covariance at construction only if
+  /// StateOptions::do_calib_gps_leverarm, exactly like _calib_dt_CAMtoIMU.
+  std::shared_ptr<ov_type::Vec> _calib_GPStoIMU;
+
+  /// True once the GPS E-to-G transform has been inserted into the state/covariance
+  bool gps_transform_initialized() const { return _gps_yaw_EtoG->id() != -1; }
+
 private:
   // Define that the state helper is a friend class of this class
   // This will allow it to access the below functions which should normally not be called

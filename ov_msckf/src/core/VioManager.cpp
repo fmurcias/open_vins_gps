@@ -39,6 +39,7 @@
 #include "state/Propagator.h"
 #include "state/State.h"
 #include "state/StateHelper.h"
+#include "update/UpdaterGPS.h"
 #include "update/UpdaterMSCKF.h"
 #include "update/UpdaterSLAM.h"
 #include "update/UpdaterZeroVelocity.h"
@@ -95,6 +96,16 @@ VioManager::VioManager(VioManagerOptions &params_) : thread_init_running(false),
     state->_cam_intrinsics.at(i)->set_fej(params.camera_intrinsics.at(i)->get_value());
     state->_calib_IMUtoCAM.at(i)->set_value(params.camera_extrinsics.at(i));
     state->_calib_IMUtoCAM.at(i)->set_fej(params.camera_extrinsics.at(i));
+  }
+
+  // GPS antenna lever arm (fixed value if not calibrating online, starting point otherwise)
+  if (params.gps.enabled) {
+    state->_calib_GPStoIMU->set_value(params.gps.leverarm_prior);
+    state->_calib_GPStoIMU->set_fej(params.gps.leverarm_prior);
+    if (params.gps.do_calib_leverarm) {
+      Eigen::MatrixXd leverarm_cov = std::pow(params.gps.leverarm_prior_std, 2) * Eigen::Matrix3d::Identity();
+      StateHelper::set_initial_covariance(state, leverarm_cov, {state->_calib_GPStoIMU});
+    }
   }
 
   //===================================================================================
@@ -161,6 +172,11 @@ VioManager::VioManager(VioManagerOptions &params_) : thread_init_running(false),
                                                         propagator, params.gravity_mag, params.zupt_max_velocity,
                                                         params.zupt_noise_multiplier, params.zupt_max_disparity);
   }
+
+  // If we are fusing GPS, then create the updater
+  if (params.gps.enabled) {
+    updaterGPS = std::make_shared<UpdaterGPS>(params.gps, propagator);
+  }
 }
 
 void VioManager::feed_measurement_imu(const ov_core::ImuData &message) {
@@ -188,11 +204,123 @@ void VioManager::feed_measurement_imu(const ov_core::ImuData &message) {
   }
 }
 
+void VioManager::feed_measurement_gps(const ov_core::GpsData &message) {
+
+  // Apply the fixed GPS-to-IMU time offset so the queue lives in the same (IMU) clock as t_cam_corrected
+  ov_core::GpsData message_corrected = message;
+  message_corrected.timestamp += params.gps.toff;
+
+  // Evaluation-only simulated outage. Dropping the fix here, before the queue or the updater, is what
+  // makes it a faithful receiver outage: nothing downstream is told it existed, so no try_update()
+  // runs and the rejection-streak reset cannot fire during the gap.
+  if (params.gps.dropout_start_secs >= 0.0 && params.gps.dropout_end_secs > params.gps.dropout_start_secs) {
+    if (gps_first_fix_timestamp < 0) {
+      gps_first_fix_timestamp = message_corrected.timestamp;
+    }
+    double t_rel = message_corrected.timestamp - gps_first_fix_timestamp;
+    if (t_rel >= params.gps.dropout_start_secs && t_rel <= params.gps.dropout_end_secs) {
+      if (!gps_in_dropout) {
+        gps_in_dropout = true;
+        PRINT_WARNING(YELLOW "[GPS]: SIMULATED OUTAGE START at t+%.1fs (t=%.6f), dropping fixes until t+%.1fs\n" RESET, t_rel,
+                      message_corrected.timestamp, params.gps.dropout_end_secs);
+      }
+      return;
+    }
+    if (gps_in_dropout) {
+      gps_in_dropout = false;
+      PRINT_WARNING(YELLOW "[GPS]: SIMULATED OUTAGE END at t+%.1fs (t=%.6f), fixes resume\n" RESET, t_rel, message_corrected.timestamp);
+    }
+  }
+
+  std::lock_guard<std::mutex> lck(gps_queue_mtx);
+  if (!gps_queue.empty() && message_corrected.timestamp < gps_queue.back().timestamp) {
+    PRINT_WARNING(YELLOW "[GPS]: dropping non-monotonic fix at t=%.6f (last queued t=%.6f)\n" RESET, message_corrected.timestamp,
+                  gps_queue.back().timestamp);
+    return;
+  }
+  gps_queue.push_back(message_corrected);
+}
+
+void VioManager::drain_gps_queue(double t_cam_corrected) {
+
+  if (updaterGPS == nullptr) {
+    return;
+  }
+
+  while (true) {
+
+    // Pop the next fix if it is at or before the camera time we are about to clone/process at
+    ov_core::GpsData g;
+    {
+      std::lock_guard<std::mutex> lck(gps_queue_mtx);
+      if (gps_queue.empty() || gps_queue.front().timestamp > t_cam_corrected) {
+        break;
+      }
+      g = gps_queue.front();
+      gps_queue.pop_front();
+    }
+
+    // The queue is in the IMU clock, but _clones_IMU and _timestamp are keyed by the raw camera clock
+    // (propagate_and_clone() is always called with an uncorrected camera timestamp). Shift back once
+    // here, or every lookup below silently misses unless calib_dt_CAMtoIMU is exactly zero.
+    g.timestamp -= state->_calib_dt_CAMtoIMU->value()(0);
+
+    // propagate_and_clone() only moves forward, so a fix at/before the state timestamp is unusable
+    // unless it lands on a live clone. Normal on the first drain after VIO init, when the queue still
+    // holds everything accumulated since node start.
+    if (g.timestamp <= state->_timestamp && state->_clones_IMU.count(g.timestamp) == 0) {
+      PRINT_DEBUG("[GPS]: dropping fix at t=%.6f, at/before state time %.6f and not clonable\n", g.timestamp, state->_timestamp);
+      continue;
+    }
+
+    // While the E-to-G transform is not yet observable, just accumulate geometry (see UpdaterGPS::feed_init)
+    if (!updaterGPS->transform_initialized()) {
+      updaterGPS->feed_init(state, g);
+      continue;
+    }
+
+    // Drop fixes that arrived too late to be clonable against the current state
+    if (g.timestamp < state->_timestamp - params.gps.max_late_dt) {
+      PRINT_WARNING(YELLOW "[GPS]: dropping late fix at t=%.6f (state at t=%.6f, max_late_dt=%.2f)\n" RESET, g.timestamp,
+                    state->_timestamp, params.gps.max_late_dt);
+      continue;
+    }
+
+    // Inflate before cloning so the clone inherits the honest post-outage uncertainty. Placed after
+    // both checks above: this must only run for fixes that will actually reach try_update().
+    updaterGPS->handle_measurement_gap(state, g.timestamp);
+
+    // A fix landing exactly on a camera clone (PPS-synced) updates against it directly -- that clone
+    // must stay available for the visual updates.
+    if (state->_clones_IMU.count(g.timestamp)) {
+      updaterGPS->try_update(state, g, state->_clones_IMU.at(g.timestamp));
+      continue;
+    }
+
+    // Otherwise propagate the real IMU to the fix time, clone, update, marginalize. This clone never
+    // carries feature observations, so it cannot disturb landmark anchoring or the window bookkeeping.
+    propagator->propagate_and_clone(state, g.timestamp);
+    if (state->_timestamp != g.timestamp || state->_clones_IMU.count(g.timestamp) == 0) {
+      PRINT_WARNING(YELLOW "[GPS]: unable to propagate to fix time %.6f, skipping\n" RESET, g.timestamp);
+      continue;
+    }
+    std::shared_ptr<PoseJPL> clone = state->_clones_IMU.at(g.timestamp);
+    updaterGPS->try_update(state, g, clone);
+    StateHelper::marginalize(state, clone);
+    state->_clones_IMU.erase(g.timestamp);
+  }
+}
+
 void VioManager::feed_measurement_simulation(double timestamp, const std::vector<int> &camids,
                                              const std::vector<std::vector<std::pair<size_t, Eigen::VectorXf>>> &feats) {
 
   // Start timing
   rT1 = boost::posix_time::microsec_clock::local_time();
+
+  // Must precede the ZUPT check below, same as track_image_and_update() -- see drain_gps_queue()
+  if (is_initialized_vio) {
+    drain_gps_queue(timestamp + state->_calib_dt_CAMtoIMU->value()(0));
+  }
 
   // Check if we actually have a simulated tracker
   // If not, recreate and re-cast the tracker to our simulation tracker
@@ -257,6 +385,12 @@ void VioManager::track_image_and_update(const ov_core::CameraData &message_const
 
   // Start timing
   rT1 = boost::posix_time::microsec_clock::local_time();
+
+  // Must run before ZUPT and image processing touch the state: UpdaterZeroVelocity::try_update() can
+  // jump state->_timestamp forward to t_cam, stranding any still-queued fix behind it.
+  if (is_initialized_vio) {
+    drain_gps_queue(message_const.timestamp + state->_calib_dt_CAMtoIMU->value()(0));
+  }
 
   // Assert we have valid measurement data and ids
   assert(!message_const.sensor_ids.empty());

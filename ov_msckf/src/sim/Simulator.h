@@ -103,6 +103,24 @@ public:
    */
   bool get_next_cam(double &time_cam, std::vector<int> &camids, std::vector<std::vector<std::pair<size_t, Eigen::VectorXf>>> &feats);
 
+  /**
+   * @brief Gets the next synthetic GPS fix if we have one (only if params.gps.enabled).
+   *
+   * Samples the ground-truth B-spline at params.sim_freq_gps, applies the true lever arm and the true
+   * E-to-G transform (sim_gps_true_yaw / sim_gps_true_pos_EinG), then adds Gaussian noise.
+   *
+   * IMPORTANT: when GPS is enabled all three streams race so they interleave in true timestamp order,
+   * so you must poll this every loop iteration alongside get_next_imu()/get_next_cam() -- otherwise
+   * this timeline never advances and the other two block forever. test_sim_repeat / test_sim_meas
+   * never touch GPS and must only be run with gps.enabled: false.
+   *
+   * @param time_gps Time that this measurement occurred at
+   * @param meas_ENU Noisy antenna position measurement in the local ENU frame
+   * @param cov Covariance of meas_ENU
+   * @return True if we have a measurement
+   */
+  bool get_next_gps(double &time_gps, Eigen::Vector3d &meas_ENU, Eigen::Matrix3d &cov);
+
   /// Returns the true 3d map of features
   std::unordered_map<size_t, Eigen::Vector3d> get_map() { return featmap; }
 
@@ -167,6 +185,9 @@ protected:
   /// Mersenne twister PRNG for measurements (CAMERAS)
   std::vector<std::mt19937> gen_meas_cams;
 
+  /// Mersenne twister PRNG for measurements (GPS)
+  std::mt19937 gen_meas_gps;
+
   /// Mersenne twister PRNG for state initialization
   std::mt19937 gen_state_init;
 
@@ -188,6 +209,9 @@ protected:
 
   /// Last time we had an CAMERA reading
   double timestamp_last_cam;
+
+  /// Last time we had a GPS reading (only meaningful if params.gps.enabled)
+  double timestamp_last_gps;
 
   /// Our running acceleration bias
   Eigen::Vector3d true_bias_accel = Eigen::Vector3d::Zero();

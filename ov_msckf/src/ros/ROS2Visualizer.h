@@ -25,7 +25,7 @@
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
-#include <image_transport/image_transport.h>
+#include <image_transport/image_transport.hpp>
 #include <message_filters/subscriber.h>
 #include <message_filters/sync_policies/approximate_time.h>
 #include <message_filters/time_synchronizer.h>
@@ -42,7 +42,7 @@
 #include <std_msgs/msg/float64.hpp>
 #include <tf2/LinearMath/Quaternion.h>
 #include <tf2/transform_datatypes.h>
-#include <tf2_geometry_msgs/tf2_geometry_msgs.h>
+#include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 #include <tf2_ros/transform_broadcaster.h>
 
 #include <atomic>
@@ -53,7 +53,7 @@
 #include <Eigen/Eigen>
 #include <boost/date_time/posix_time/posix_time.hpp>
 #include <boost/filesystem.hpp>
-#include <cv_bridge/cv_bridge.h>
+#include <cv_bridge/cv_bridge.hpp>
 
 namespace ov_core {
 class YamlParser;
@@ -119,6 +119,9 @@ public:
   void callback_stereo(const sensor_msgs::msg::Image::ConstSharedPtr msg0, const sensor_msgs::msg::Image::ConstSharedPtr msg1, int cam_id0,
                        int cam_id1);
 
+  /// Callback for GPS fixes (only active if the estimator config has gps_enabled: true)
+  void callback_gps(const sensor_msgs::msg::NavSatFix::SharedPtr msg);
+
 protected:
   /// Publish the current state
   void publish_state();
@@ -128,6 +131,9 @@ protected:
 
   /// Publish current features
   void publish_features();
+
+  /// Publish the estimated enu->global TF and the ENU-frame trajectory of received fixes
+  void publish_gps();
 
   /// Publish groundtruth (if we have it)
   void publish_groundtruth();
@@ -157,6 +163,7 @@ protected:
 
   // Our subscribers and camera synchronizers
   rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr sub_imu;
+  rclcpp::Subscription<sensor_msgs::msg::NavSatFix>::SharedPtr sub_gps;
   std::vector<rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr> subs_cam;
   typedef message_filters::sync_policies::ApproximateTime<sensor_msgs::msg::Image, sensor_msgs::msg::Image> sync_pol;
   std::vector<std::shared_ptr<message_filters::Synchronizer<sync_pol>>> sync_cam;
@@ -164,6 +171,19 @@ protected:
 
   // For path viz
   std::vector<geometry_msgs::msg::PoseStamped> poses_imu;
+
+  // GPS: datum (either fixed by the "gps_datum" param, or set from the first valid fix), ENU path publisher/path
+  rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pub_pathenu;
+  bool gps_datum_set = false;
+  double gps_datum_lat = 0.0, gps_datum_lon = 0.0, gps_datum_alt = 0.0;
+  /// Guards poses_enu, which -- unlike poses_imu -- is written by callback_gps() and read by
+  /// publish_gps() (called from visualize(), i.e. off callback_inertial()). Today rclcpp puts both
+  /// subscriptions in the node's default MutuallyExclusive callback group, so the MultiThreadedExecutor
+  /// still serializes them and this lock is redundant -- but that safety is implicit and disappears the
+  /// moment anyone gives either subscription an explicit callback group. See the ROS1 visualizer, where
+  /// the equivalent race is live under AsyncSpinner.
+  std::mutex poses_enu_mtx;
+  std::vector<geometry_msgs::msg::PoseStamped> poses_enu;
 
   // Groundtruth infomation
   rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pub_pathgt;

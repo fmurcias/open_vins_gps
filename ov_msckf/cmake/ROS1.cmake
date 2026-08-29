@@ -87,6 +87,7 @@ list(APPEND LIBRARY_SOURCES
         src/update/UpdaterMSCKF.cpp
         src/update/UpdaterSLAM.cpp
         src/update/UpdaterZeroVelocity.cpp
+        src/update/UpdaterGPS.cpp
 )
 if (catkin_FOUND AND ENABLE_ROS)
     list(APPEND LIBRARY_SOURCES src/ros/ROS1Visualizer.cpp src/ros/ROSVisualizerHelper.cpp)
@@ -153,6 +154,39 @@ install(TARGETS test_sim_meas
 add_executable(test_sim_repeat src/test_sim_repeat.cpp)
 target_link_libraries(test_sim_repeat ov_msckf_lib ${thirdparty_libraries})
 install(TARGETS test_sim_repeat
+        ARCHIVE DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
+        LIBRARY DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
+        RUNTIME DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
+)
+
+add_executable(test_gps_jacobians src/test_gps_jacobians.cpp)
+target_link_libraries(test_gps_jacobians ov_msckf_lib ${thirdparty_libraries})
+install(TARGETS test_gps_jacobians
+        ARCHIVE DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
+        LIBRARY DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
+        RUNTIME DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
+)
+
+add_executable(test_gps_clone_cycle src/test_gps_clone_cycle.cpp)
+target_link_libraries(test_gps_clone_cycle ov_msckf_lib ${thirdparty_libraries})
+install(TARGETS test_gps_clone_cycle
+        ARCHIVE DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
+        LIBRARY DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
+        RUNTIME DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
+)
+
+add_executable(test_gps_sim src/test_gps_sim.cpp)
+target_compile_definitions(test_gps_sim PRIVATE OV_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../ov_data")
+target_link_libraries(test_gps_sim ov_msckf_lib ${thirdparty_libraries})
+install(TARGETS test_gps_sim
+        ARCHIVE DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
+        LIBRARY DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
+        RUNTIME DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
+)
+
+add_executable(run_serial_kaist src/run_serial_kaist.cpp)
+target_link_libraries(run_serial_kaist ov_msckf_lib ${thirdparty_libraries})
+install(TARGETS run_serial_kaist
         ARCHIVE DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
         LIBRARY DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
         RUNTIME DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}

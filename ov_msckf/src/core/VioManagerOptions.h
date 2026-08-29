@@ -30,6 +30,7 @@
 #include <vector>
 
 #include "state/StateOptions.h"
+#include "update/UpdaterGPSOptions.h"
 #include "update/UpdaterOptions.h"
 #include "utils/NoiseManager.h"
 
@@ -63,6 +64,9 @@ struct VioManagerOptions {
     print_and_load_estimator(parser);
     print_and_load_trackers(parser);
     print_and_load_noise(parser);
+
+    // needs state_options to already be loaded (folds into state_options.do_calib_gps_leverarm)
+    print_and_load_gps(parser);
 
     // needs to be called last
     print_and_load_state(parser);
@@ -182,6 +186,22 @@ struct VioManagerOptions {
     aruco_options.print();
     PRINT_DEBUG("  Updater ZUPT:\n");
     zupt_options.print();
+  }
+
+  // GPS ======================================
+
+  /// Our GPS options (struct lives in its own header so UpdaterGPS doesn't need to pull in all of VioManagerOptions.h)
+  GPSOptions gps;
+
+  /**
+   * @brief This function will load and print all GPS parameters.
+   * NOTE: needs to be called after print_and_load_estimator() (which loads state_options) and before
+   * the State is constructed, since it folds gps.enabled/do_calib_leverarm into state_options.do_calib_gps_leverarm.
+   * @param parser If not null, this parser will be used to load our parameters
+   */
+  void print_and_load_gps(const std::shared_ptr<ov_core::YamlParser> &parser = nullptr) {
+    gps.print(parser);
+    state_options.do_calib_gps_leverarm = gps.enabled && gps.do_calib_leverarm;
   }
 
   // STATE DEFAULTS ==========================
@@ -536,6 +556,18 @@ struct VioManagerOptions {
   /// Feature distance we generate features from (maximum)
   double sim_max_feature_gen_distance = 10;
 
+  /// Frequency (Hz) that we will simulate our GPS at (only used if gps.enabled)
+  double sim_freq_gps = 5.0;
+
+  /// Std (meters, per axis) of the Gaussian noise added to synthetic GPS fixes
+  double sim_gps_noise_std = 1.0;
+
+  /// True E-to-G yaw (radians) used to generate synthetic GPS fixes (ground truth, independent of the filter's estimate)
+  double sim_gps_true_yaw = 0.3;
+
+  /// True E-to-G translation p_EinG (meters) used to generate synthetic GPS fixes
+  Eigen::Vector3d sim_gps_true_pos_EinG = Eigen::Vector3d::Zero();
+
   /**
    * @brief This function will load print out all simulated parameters.
    * This allows for visual checking that everything was loaded properly from ROS/CMD parsers.
@@ -554,6 +586,12 @@ struct VioManagerOptions {
       parser->parse_config("sim_freq_imu", sim_freq_imu);
       parser->parse_config("sim_min_feature_gen_dist", sim_min_feature_gen_distance);
       parser->parse_config("sim_max_feature_gen_dist", sim_max_feature_gen_distance);
+      parser->parse_config("sim_freq_gps", sim_freq_gps);
+      parser->parse_config("sim_gps_noise_std", sim_gps_noise_std);
+      parser->parse_config("sim_gps_true_yaw", sim_gps_true_yaw);
+      std::vector<double> pos_EinG = {sim_gps_true_pos_EinG(0), sim_gps_true_pos_EinG(1), sim_gps_true_pos_EinG(2)};
+      parser->parse_config("sim_gps_true_pos_EinG", pos_EinG);
+      sim_gps_true_pos_EinG << pos_EinG.at(0), pos_EinG.at(1), pos_EinG.at(2);
     }
     PRINT_DEBUG("SIMULATION PARAMETERS:\n");
     PRINT_WARNING(BOLDRED "  - state init seed: %d \n" RESET, sim_seed_state_init);
@@ -566,6 +604,13 @@ struct VioManagerOptions {
     PRINT_DEBUG("  - imu feq: %.2f\n", sim_freq_imu);
     PRINT_DEBUG("  - min feat dist: %.2f\n", sim_min_feature_gen_distance);
     PRINT_DEBUG("  - max feat dist: %.2f\n", sim_max_feature_gen_distance);
+    if (gps.enabled) {
+      PRINT_DEBUG("  - gps freq: %.2f\n", sim_freq_gps);
+      PRINT_DEBUG("  - gps noise std: %.2f\n", sim_gps_noise_std);
+      PRINT_DEBUG("  - gps true yaw (deg): %.2f\n", sim_gps_true_yaw * 180.0 / M_PI);
+      PRINT_DEBUG("  - gps true p_EinG: %.2f, %.2f, %.2f\n", sim_gps_true_pos_EinG(0), sim_gps_true_pos_EinG(1),
+                  sim_gps_true_pos_EinG(2));
+    }
   }
 };
 

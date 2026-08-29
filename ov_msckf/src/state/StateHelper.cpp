@@ -223,6 +223,30 @@ void StateHelper::set_initial_covariance(std::shared_ptr<State> state, const Eig
   state->_Cov = state->_Cov.selfadjointView<Eigen::Upper>();
 }
 
+void StateHelper::inflate_covariance(std::shared_ptr<State> state, const std::vector<std::shared_ptr<ov_type::Type>> &order,
+                                     const Eigen::MatrixXd &add) {
+
+  int total = 0;
+  for (const auto &v : order) {
+    total += v->size();
+  }
+  assert(add.rows() == total && add.cols() == total);
+
+  // Block-wise, since the listed variables are generally not contiguous. Cross-terms to the rest of
+  // the state are left untouched, preserving what the filter has learned about their correlations.
+  int i_index = 0;
+  for (size_t i = 0; i < order.size(); i++) {
+    int k_index = 0;
+    for (size_t k = 0; k < order.size(); k++) {
+      state->_Cov.block(order[i]->id(), order[k]->id(), order[i]->size(), order[k]->size()) +=
+          add.block(i_index, k_index, order[i]->size(), order[k]->size());
+      k_index += order[k]->size();
+    }
+    i_index += order[i]->size();
+  }
+  state->_Cov = state->_Cov.selfadjointView<Eigen::Upper>();
+}
+
 Eigen::MatrixXd StateHelper::get_marginal_covariance(std::shared_ptr<State> state,
                                                      const std::vector<std::shared_ptr<Type>> &small_variables) {
 

@@ -1,0 +1,181 @@
+%YAML:1.0 # need to specify the file type at the top!
+
+# ==================================================================
+# config/kaist + GPS fusion, for the deterministic serial evaluation harness
+# (ov_msckf/src/run_serial_kaist.cpp, ov_msckf/scripts/kaist_eval/). Everything above the GPS
+# block is copied unmodified from config/kaist/ (VIO-only, no GPS) -- only init_dyn_mle_max_threads
+# is changed (6 -> 1) and the GPS block below is new. See ov_msckf/src/update/UpdaterGPS.h for the
+# full GPS fusion design.
+# ==================================================================
+
+verbosity: "INFO" # ALL, DEBUG, INFO, WARNING, ERROR, SILENT
+
+use_fej: true # if first-estimate Jacobians should be used (enable for good consistency)
+integration: "rk4" # discrete, rk4, analytical (if rk4 or analytical used then analytical covariance propagation is used)
+use_stereo: true # if we have more than 1 camera, if we should try to track stereo constraints
+max_cameras: 2 # how many cameras we have 1 = mono, 2 = stereo, >2 = binocular (all mono tracking)
+
+calib_cam_extrinsics: false # degenerate motion
+calib_cam_intrinsics: true
+calib_cam_timeoffset: true # degenerate motion
+calib_imu_intrinsics: false
+calib_imu_g_sensitivity: false
+
+max_clones: 11
+max_slam: 50
+max_slam_in_update: 25
+max_msckf_in_update: 50
+dt_slam_delay: 1
+
+gravity_mag: 9.81
+
+feat_rep_msckf: "ANCHORED_MSCKF_INVERSE_DEPTH"
+feat_rep_slam: "ANCHORED_MSCKF_INVERSE_DEPTH"
+feat_rep_aruco: "ANCHORED_MSCKF_INVERSE_DEPTH"
+
+# zero velocity update parameters we can use
+# we support either IMU-based or disparity detection.
+try_zupt: true
+zupt_chi2_multipler: 0.5 # set to 0 for only disp-based
+zupt_max_velocity: 0.1
+zupt_noise_multiplier: 1
+zupt_max_disparity: 0.4 # set to 0 for only imu-based
+zupt_only_at_beginning: false
+
+# ==================================================================
+# ==================================================================
+
+init_window_time: 2.0
+init_imu_thresh: 0.5
+init_max_disparity: 1.5
+init_max_features: 50
+
+init_dyn_use: true
+init_dyn_mle_opt_calib: false
+init_dyn_mle_max_iter: 50
+init_dyn_mle_max_time: 0.05
+init_dyn_mle_max_threads: 1 # was 6 in config/kaist -- forced serial for determinism (Ceres does not
+# guarantee a fixed reduction order across threads); run_serial_kaist.cpp also forces this in code
+# regardless of what is set here, so this is documentation as much as it is functional.
+init_dyn_num_pose: 6
+init_dyn_min_deg: 5.0 # traj is mostly straight line motion
+
+init_dyn_inflation_ori: 10
+init_dyn_inflation_vel: 100
+init_dyn_inflation_bg: 10
+init_dyn_inflation_ba: 100
+init_dyn_min_rec_cond: 1e-20 # traj is mostly straight line motion
+
+init_dyn_bias_g: [0.0, 0.0, 0.0]
+init_dyn_bias_a: [0.0, 0.0, 0.0]
+
+
+# ==================================================================
+# ==================================================================
+
+record_timing_information: false
+record_timing_filepath: "/tmp/traj_timing.txt"
+
+save_total_state: false
+filepath_est: "/tmp/ov_estimate.txt"
+filepath_std: "/tmp/ov_estimate_std.txt"
+filepath_gt: "/tmp/ov_groundtruth.txt"
+
+# ==================================================================
+# ==================================================================
+
+# our front-end feature tracking parameters
+# we have a KLT and descriptor based (KLT is better implemented...)
+use_klt: true
+num_pts: 200
+fast_threshold: 30
+grid_x: 5
+grid_y: 5
+min_px_dist: 20
+knn_ratio: 0.65
+track_frequency: 31.0
+downsample_cameras: false
+num_opencv_threads: 4 # -1: auto, 0-1: serial, >1: number of threads -- run_serial_kaist.cpp forces
+# this to 0 in code regardless of what is set here, for determinism (see its file header comment).
+histogram_method: "HISTOGRAM" # NONE, HISTOGRAM, CLAHE
+
+fi_min_dist: 0.25
+fi_max_dist: 150.0
+fi_max_baseline: 200
+fi_max_cond_number: 20000
+fi_triangulate_1d: false
+
+# aruco tag tracker for the system
+# DICT_6X6_1000 from https://chev.me/arucogen/
+use_aruco: false
+num_aruco: 1024
+downsize_aruco: true
+
+# ==================================================================
+# ==================================================================
+
+# camera noises and chi-squared threshold multipliers
+up_msckf_sigma_px: 1.5
+up_msckf_chi2_multipler: 1
+up_slam_sigma_px: 1.5
+up_slam_chi2_multipler: 1
+up_aruco_sigma_px: 1
+up_aruco_chi2_multipler: 1
+
+# masks for our images
+use_mask: false
+
+# imu and camera spacial-temporal
+# imu config should also have the correct noise values
+relative_config_imu: "kalibr_imu_chain.yaml"
+relative_config_imucam: "kalibr_imucam_chain.yaml"
+
+# ==================================================================
+# ==================================================================
+
+# GPS fusion: single-filter, position-domain (i.e. loosely coupled -- the measurement is a receiver
+# PVT solution, not raw pseudoranges). See ov_msckf/src/update/UpdaterGPS.h for the full design.
+#
+# Values below are seeded from config/fgi_masala's GPS block as a starting template -- they are NOT
+# precision-tuned for this dataset, tune noise_floor/init thresholds after the first run. The lever
+# arm and datum ARE precisely derived (see below), not guesses.
+gps_enabled: true
+gps_chi2_multipler: 5.0 # chi2 gate multiplier applied to both per-fix updates and the delayed-init gate
+gps_noise_floor: 0.5 # minimum std (meters, per axis) we floor the reported fix covariance to
+gps_noise_multiplier: 1.0 # multiplier applied to the (floored) covariance from the GPS message
+gps_toff: 0.0 # fixed GPS-to-IMU time offset (seconds): t_imu = t_gps + toff
+
+# Antenna lever arm p_ANTinI (meters), derived from the raw KAIST calibration files
+# (calibration/Vehicle2GPS.txt T=[-0.32,0,1.70], calibration/Vehicle2IMU.txt T=[-0.07,0,1.70], both
+# R=I) as p_ANTinI = Vehicle2GPS.T - Vehicle2IMU.T. Cross-validated: this repo's existing
+# config/kaist/kalibr_imucam_chain.yaml T_imu_cam translation [1.71239,0.24740,-0.11589] equals the
+# same Vehicle2Stereo.T - Vehicle2IMU.T subtraction, confirming both the calibration files' frame
+# convention and this derivation.
+gps_leverarm_prior: [-0.25, 0.0, 0.0]
+gps_leverarm_prior_std: 0.3
+gps_do_calib_leverarm: true
+
+gps_init_min_meas: 30 # minimum accumulated GPS/VIO pairs before attempting delayed E-to-G initialization
+gps_init_min_baseline: 30.0 # minimum XY baseline (meters) of the accumulated VIO positions before initializing
+gps_init_min_excursion: 25.0 # minimum min-eigenvalue (m^2) of the XY spread, so yaw is observable
+gps_init_max_pairs: 200 # cap on accumulated GPS/VIO pairs kept for delayed init (oldest dropped first)
+gps_reset_after_rejection_secs: 30.0 # how long a consecutive-rejection streak must last before reset
+gps_gap_threshold_secs: 2.0 # a GPS gap longer than this counts as an outage (normal fix interval ~0.2-0.3s here)
+gps_gap_drift_rate: 0.15 # assumed VIO drift (m/s) used to inflate the position covariance after an outage
+gps_gap_max_sigma: 25.0 # ceiling (meters, 1-sigma) on the cumulative inflation one outage may apply
+gps_max_late_dt: 0.1 # fixes older than (state time - this) are dropped with a warning instead of processed
+
+# Evaluation-only simulated GPS outage, in seconds relative to the FIRST fix received (-1 = disabled).
+gps_dropout_start_secs: -1
+gps_dropout_end_secs: -1
+
+# GPS local-ENU datum, PINNED EXPLICITLY (not left to "first fix") = the first row of this sequence's
+# sensor_data/gps.csv (lat, lon, alt). Pinning matters here specifically because the dropout-variant
+# configs (see ov_msckf/scripts/kaist_eval/run_eval_kaist.sh) skip different leading fixes depending
+# on the dropout window -- an auto-picked "first fix" datum would then silently differ between
+# variants, putting each one's GPS residuals (and the estimated E-to-G transform) in a different ENU
+# frame. That is not something ov_eval's posyaw/se3 alignment corrects for after the fact, since
+# alignment relates the estimate to ground truth, not to another run's internal GPS frame. Read
+# directly by run_serial_kaist.cpp (this key is not part of GPSOptions -- ROS2Visualizer parses the
+# same key locally for the same reason, see its setup_subscribers()).
+gps_datum: [37.3971009, 127.1072488, 62.708] # urban28-pankyo first gps.csv fix

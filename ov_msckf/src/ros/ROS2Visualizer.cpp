@@ -27,8 +27,11 @@
 #include "state/Propagator.h"
 #include "state/State.h"
 #include "state/StateHelper.h"
+#include "types/PoseJPL.h"
 #include "utils/dataset_reader.h"
+#include "utils/gps_conv.h"
 #include "utils/print.h"
+#include "utils/quat_ops.h"
 #include "utils/sensor_data.h"
 
 using namespace ov_core;
@@ -71,6 +74,10 @@ ROS2Visualizer::ROS2Visualizer(std::shared_ptr<rclcpp::Node> node, std::shared_p
   PRINT_DEBUG("Publishing: %s\n", pub_posegt->get_topic_name());
   pub_pathgt = node->create_publisher<nav_msgs::msg::Path>("pathgt", 2);
   PRINT_DEBUG("Publishing: %s\n", pub_pathgt->get_topic_name());
+
+  // GPS: trajectory of received fixes in the local ENU frame
+  pub_pathenu = node->create_publisher<nav_msgs::msg::Path>("pathenu", 2);
+  PRINT_DEBUG("Publishing: %s\n", pub_pathenu->get_topic_name());
 
   // Loop closure publishers
   pub_loop_pose = node->create_publisher<nav_msgs::msg::Odometry>("loop_pose", 2);
@@ -216,6 +223,26 @@ void ROS2Visualizer::setup_subscribers(std::shared_ptr<ov_core::YamlParser> pars
       PRINT_INFO("subscribing to cam (mono): %s\n", cam_topic.c_str());
     }
   }
+
+  // GPS: only subscribe if fusion is actually enabled
+  if (_app->get_params().gps.enabled) {
+    std::string topic_gps = "/gps/fix";
+    parser->parse_config("topic_gps", topic_gps, false);
+    sub_gps = _node->create_subscription<sensor_msgs::msg::NavSatFix>(
+        topic_gps, rclcpp::SensorDataQoS(), std::bind(&ROS2Visualizer::callback_gps, this, std::placeholders::_1));
+    PRINT_INFO("subscribing to GPS: %s\n", topic_gps.c_str());
+
+    // Optional fixed datum (lat, lon, alt in degrees/meters); if not given we use the first valid fix
+    std::vector<double> gps_datum;
+    parser->parse_config("gps_datum", gps_datum, false);
+    if (gps_datum.size() == 3) {
+      gps_datum_lat = gps_datum.at(0);
+      gps_datum_lon = gps_datum.at(1);
+      gps_datum_alt = gps_datum.at(2);
+      gps_datum_set = true;
+      PRINT_INFO("using fixed GPS datum: lat=%.8f, lon=%.8f, alt=%.3f\n", gps_datum_lat, gps_datum_lon, gps_datum_alt);
+    }
+  }
 }
 
 void ROS2Visualizer::visualize() {
@@ -245,6 +272,11 @@ void ROS2Visualizer::visualize() {
 
   // publish state
   publish_state();
+
+  // publish the estimated enu->global TF and the ENU path, if we are fusing GPS
+  if (_app->get_params().gps.enabled) {
+    publish_gps();
+  }
 
   // publish points
   publish_features();
@@ -495,6 +527,66 @@ void ROS2Visualizer::callback_inertial(const sensor_msgs::msg::Imu::SharedPtr ms
   }
 }
 
+void ROS2Visualizer::callback_gps(const sensor_msgs::msg::NavSatFix::SharedPtr msg) {
+
+  // Filter by fix status (reject anything without at least a plain fix lock)
+  if (msg->status.status < sensor_msgs::msg::NavSatStatus::STATUS_FIX) {
+    PRINT_DEBUG(YELLOW "[GPS]: dropping fix with no status lock (status=%d)\n" RESET, (int)msg->status.status);
+    return;
+  }
+
+  // Datum = first valid fix, unless fixed by the "gps_datum" config parameter (see setup_subscribers)
+  if (!gps_datum_set) {
+    gps_datum_lat = msg->latitude;
+    gps_datum_lon = msg->longitude;
+    gps_datum_alt = msg->altitude;
+    gps_datum_set = true;
+    PRINT_INFO(GREEN "[GPS]: datum set from first valid fix: lat=%.8f, lon=%.8f, alt=%.3f\n" RESET, gps_datum_lat, gps_datum_lon,
+               gps_datum_alt);
+  }
+
+  // Convert LLA (WGS84) -> local ENU using our datum
+  Eigen::Vector3d meas_ENU =
+      ov_core::gps::lla2enu(msg->latitude, msg->longitude, msg->altitude, gps_datum_lat, gps_datum_lon, gps_datum_alt);
+
+  // Respect position_covariance_type, falling back to a conservative prior when unknown (UpdaterGPS
+  // floors this further anyway)
+  Eigen::Matrix3d cov;
+  if (msg->position_covariance_type == sensor_msgs::msg::NavSatFix::COVARIANCE_TYPE_UNKNOWN) {
+    cov = std::pow(10.0, 2) * Eigen::Matrix3d::Identity();
+  } else {
+    for (int r = 0; r < 3; r++) {
+      for (int c = 0; c < 3; c++) {
+        cov(r, c) = msg->position_covariance[3 * r + c];
+      }
+    }
+    // Some receivers report a non-UNKNOWN type but still publish all zeros. An all-zero R would make
+    // the update infinitely confident before the noise floor is applied, so treat it as UNKNOWN.
+    if (cov.isZero(0.0)) {
+      cov = std::pow(10.0, 2) * Eigen::Matrix3d::Identity();
+    }
+  }
+
+  ov_core::GpsData message;
+  message.timestamp = msg->header.stamp.sec + msg->header.stamp.nanosec * 1e-9;
+  message.meas_ENU = meas_ENU;
+  message.cov = cov;
+  _app->feed_measurement_gps(message);
+
+  // Record for the ENU path publisher (actual publish happens in visualize(), see publish_gps())
+  geometry_msgs::msg::PoseStamped pose_enu;
+  pose_enu.header = msg->header;
+  pose_enu.header.frame_id = "enu";
+  pose_enu.pose.position.x = meas_ENU(0);
+  pose_enu.pose.position.y = meas_ENU(1);
+  pose_enu.pose.position.z = meas_ENU(2);
+  pose_enu.pose.orientation.w = 1.0;
+  {
+    std::lock_guard<std::mutex> lck(poses_enu_mtx);
+    poses_enu.push_back(pose_enu);
+  }
+}
+
 void ROS2Visualizer::callback_monocular(const sensor_msgs::msg::Image::SharedPtr msg0, int cam_id0) {
 
   // Check if we should drop this image
@@ -641,6 +733,44 @@ void ROS2Visualizer::publish_state() {
     arrIMU.poses.push_back(poses_imu.at(i));
   }
   pub_pathimu->publish(arrIMU);
+}
+
+void ROS2Visualizer::publish_gps() {
+
+  std::shared_ptr<State> state = _app->get_state();
+
+  // Publish the estimated enu->global transform, once it has actually been initialized
+  // NOTE: since we use JPL we have an implicit conversion to Hamilton when we publish, same as publish_state()
+  if (state->gps_transform_initialized()) {
+    auto enu_pose = std::make_shared<ov_type::PoseJPL>();
+    Eigen::Matrix<double, 7, 1> value;
+    value.block(0, 0, 4, 1) = ov_core::rot_2_quat(ov_core::rot_z(state->_gps_yaw_EtoG->value()(0)));
+    value.block(4, 0, 3, 1) = state->_gps_pos_EinG->value();
+    enu_pose->set_value(value);
+    // flip_trans=true: enu_pose stores (q_EtoG, p_EinG), i.e. the PARENT origin in the CHILD frame
+    // (same convention as the camera extrinsics), so the flip recovers p_GinE for the TF.
+    geometry_msgs::msg::TransformStamped trans = ROSVisualizerHelper::get_stamped_transform_from_pose(_node, enu_pose, true);
+    trans.header.stamp = _node->now();
+    trans.header.frame_id = "enu";
+    trans.child_frame_id = "global";
+    mTfBr->sendTransform(trans);
+  }
+
+  // Publish the ENU-frame trajectory of received fixes
+  // NOTE: we downsample the number of poses as needed to prevent rviz crashes, same as publish_state()
+  // callback_gps() appends concurrently, so collect under the lock and build/publish after releasing.
+  nav_msgs::msg::Path arrENU;
+  {
+    std::lock_guard<std::mutex> lck(poses_enu_mtx);
+    if (poses_enu.empty())
+      return;
+    for (size_t i = 0; i < poses_enu.size(); i += std::floor((double)poses_enu.size() / 16384.0) + 1) {
+      arrENU.poses.push_back(poses_enu.at(i));
+    }
+  }
+  arrENU.header.stamp = _node->now();
+  arrENU.header.frame_id = "enu";
+  pub_pathenu->publish(arrENU);
 }
 
 void ROS2Visualizer::publish_images() {

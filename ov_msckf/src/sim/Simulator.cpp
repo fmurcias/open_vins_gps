@@ -21,6 +21,9 @@
 
 #include "Simulator.h"
 
+#include <algorithm>
+#include <limits>
+
 #include "cam/CamBase.h"
 #include "cam/CamEqui.h"
 #include "cam/CamRadtan.h"
@@ -28,6 +31,7 @@
 #include "state/State.h"
 #include "utils/colors.h"
 #include "utils/dataset_reader.h"
+#include "utils/quat_ops.h"
 
 using namespace ov_core;
 using namespace ov_msckf;
@@ -67,6 +71,7 @@ Simulator::Simulator(VioManagerOptions &params_) {
   timestamp = spline->get_start_time();
   timestamp_last_imu = spline->get_start_time();
   timestamp_last_cam = spline->get_start_time();
+  timestamp_last_gps = spline->get_start_time();
 
   // Get the pose at the current timestep
   Eigen::Matrix3d R_GtoI_init;
@@ -104,6 +109,7 @@ Simulator::Simulator(VioManagerOptions &params_) {
       timestamp += 1.0 / params.sim_freq_cam;
       timestamp_last_imu += 1.0 / params.sim_freq_cam;
       timestamp_last_cam += 1.0 / params.sim_freq_cam;
+      timestamp_last_gps += 1.0 / params.sim_freq_cam;
     }
   }
   PRINT_DEBUG("[SIM]: moved %.3f seconds into the dataset where it starts moving\n", timestamp - spline->get_start_time());
@@ -132,6 +138,8 @@ Simulator::Simulator(VioManagerOptions &params_) {
   gen_state_perturb.seed(params.sim_seed_preturb);
   gen_meas_imu = std::mt19937(params.sim_seed_measurements);
   gen_meas_imu.seed(params.sim_seed_measurements);
+  gen_meas_gps = std::mt19937(params.sim_seed_measurements);
+  gen_meas_gps.seed(params.sim_seed_measurements);
 
   // Create generator for our camera
   for (int i = 0; i < params.state_options.num_cameras; i++) {
@@ -310,8 +318,11 @@ bool Simulator::get_state(double desired_time, Eigen::Matrix<double, 17, 1> &imu
 
 bool Simulator::get_next_imu(double &time_imu, Eigen::Vector3d &wm, Eigen::Vector3d &am) {
 
-  // Return if the camera measurement should go before us
-  if (timestamp_last_cam + 1.0 / params.sim_freq_cam < timestamp_last_imu + 1.0 / params.sim_freq_imu)
+  // Return if the camera (or, if enabled, GPS) measurement should go before us
+  // NOTE: when gps is disabled next_gps is +infinity, so this reduces to the original 2-way race exactly
+  double next_cam = timestamp_last_cam + 1.0 / params.sim_freq_cam;
+  double next_gps = params.gps.enabled ? timestamp_last_gps + 1.0 / params.sim_freq_gps : std::numeric_limits<double>::infinity();
+  if (std::min(next_cam, next_gps) < timestamp_last_imu + 1.0 / params.sim_freq_imu)
     return false;
 
   // Else lets do a new measurement!!!
@@ -391,8 +402,11 @@ bool Simulator::get_next_imu(double &time_imu, Eigen::Vector3d &wm, Eigen::Vecto
 bool Simulator::get_next_cam(double &time_cam, std::vector<int> &camids,
                              std::vector<std::vector<std::pair<size_t, Eigen::VectorXf>>> &feats) {
 
-  // Return if the imu measurement should go before us
-  if (timestamp_last_imu + 1.0 / params.sim_freq_imu < timestamp_last_cam + 1.0 / params.sim_freq_cam)
+  // Return if the imu (or, if enabled, GPS) measurement should go before us
+  // NOTE: when gps is disabled next_gps is +infinity, so this reduces to the original 2-way race exactly
+  double next_imu = timestamp_last_imu + 1.0 / params.sim_freq_imu;
+  double next_gps = params.gps.enabled ? timestamp_last_gps + 1.0 / params.sim_freq_gps : std::numeric_limits<double>::infinity();
+  if (std::min(next_imu, next_gps) < timestamp_last_cam + 1.0 / params.sim_freq_cam)
     return false;
 
   // Else lets do a new measurement!!!
@@ -445,6 +459,52 @@ bool Simulator::get_next_cam(double &time_cam, std::vector<int> &camids,
     feats.push_back(uvs);
     camids.push_back(i);
   }
+
+  // Return success
+  return true;
+}
+
+bool Simulator::get_next_gps(double &time_gps, Eigen::Vector3d &meas_ENU, Eigen::Matrix3d &cov) {
+
+  // GPS is entirely opt-in: if disabled we never produce a measurement (and never advance timestamp_last_gps)
+  if (!params.gps.enabled) {
+    return false;
+  }
+
+  // Return if the imu or camera measurement should go before us
+  double next_imu = timestamp_last_imu + 1.0 / params.sim_freq_imu;
+  double next_cam = timestamp_last_cam + 1.0 / params.sim_freq_cam;
+  if (std::min(next_imu, next_cam) < timestamp_last_gps + 1.0 / params.sim_freq_gps)
+    return false;
+
+  // Else lets do a new measurement!!!
+  timestamp_last_gps += 1.0 / params.sim_freq_gps;
+  timestamp = timestamp_last_gps;
+  time_gps = timestamp_last_gps;
+
+  // Get the true pose at this time
+  Eigen::Matrix3d R_GtoI;
+  Eigen::Vector3d p_IinG;
+  bool success_pose = spline->get_pose(timestamp, R_GtoI, p_IinG);
+
+  // We have finished generating measurements
+  if (!success_pose) {
+    is_running = false;
+    return false;
+  }
+
+  // True antenna position in G (using our own -- unperturbed -- copy of the lever arm, i.e. ground truth)
+  Eigen::Vector3d p_ANTinG = p_IinG + R_GtoI.transpose() * params.gps.leverarm_prior;
+
+  // Transform into the local ENU frame using the true E-to-G transform: p_ANTinG = R_EtoG*p_ANTinE + p_EinG
+  Eigen::Matrix3d R_EtoG = rot_z(params.sim_gps_true_yaw);
+  Eigen::Vector3d p_ANTinE_true = R_EtoG.transpose() * (p_ANTinG - params.sim_gps_true_pos_EinG);
+
+  // Add Gaussian noise and report our (isotropic) covariance
+  std::normal_distribution<double> w(0, 1);
+  Eigen::Vector3d noise(w(gen_meas_gps), w(gen_meas_gps), w(gen_meas_gps));
+  meas_ENU = p_ANTinE_true + params.sim_gps_noise_std * noise;
+  cov = std::pow(params.sim_gps_noise_std, 2) * Eigen::Matrix3d::Identity();
 
   // Return success
   return true;

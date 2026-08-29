@@ -24,7 +24,7 @@
 
 #include <geometry_msgs/PoseStamped.h>
 #include <geometry_msgs/PoseWithCovarianceStamped.h>
-#include <image_transport/image_transport.h>
+#include <image_transport/image_transport.hpp>
 #include <message_filters/subscriber.h>
 #include <message_filters/sync_policies/approximate_time.h>
 #include <message_filters/time_synchronizer.h>
@@ -49,7 +49,7 @@
 #include <Eigen/Eigen>
 #include <boost/date_time/posix_time/posix_time.hpp>
 #include <boost/filesystem.hpp>
-#include <cv_bridge/cv_bridge.h>
+#include <cv_bridge/cv_bridge.hpp>
 
 namespace ov_core {
 class YamlParser;
@@ -114,6 +114,9 @@ public:
   /// Callback for synchronized stereo camera information
   void callback_stereo(const sensor_msgs::ImageConstPtr &msg0, const sensor_msgs::ImageConstPtr &msg1, int cam_id0, int cam_id1);
 
+  /// Callback for GPS fixes (only active if the estimator config has gps_enabled: true)
+  void callback_gps(const sensor_msgs::NavSatFix::ConstPtr &msg);
+
 protected:
   /// Publish the current state
   void publish_state();
@@ -123,6 +126,9 @@ protected:
 
   /// Publish current features
   void publish_features();
+
+  /// Publish the estimated enu->global TF and the ENU-frame trajectory of received fixes
+  void publish_gps();
 
   /// Publish groundtruth (if we have it)
   void publish_groundtruth();
@@ -144,14 +150,27 @@ protected:
   ros::Publisher pub_poseimu, pub_odomimu, pub_pathimu;
   ros::Publisher pub_points_msckf, pub_points_slam, pub_points_aruco, pub_points_sim;
   ros::Publisher pub_loop_pose, pub_loop_point, pub_loop_extrinsic, pub_loop_intrinsics;
+  ros::Publisher pub_pathenu;
   std::shared_ptr<tf::TransformBroadcaster> mTfBr;
 
   // Our subscribers and camera synchronizers
   ros::Subscriber sub_imu;
+  ros::Subscriber sub_gps;
   std::vector<ros::Subscriber> subs_cam;
   typedef message_filters::sync_policies::ApproximateTime<sensor_msgs::Image, sensor_msgs::Image> sync_pol;
   std::vector<std::shared_ptr<message_filters::Synchronizer<sync_pol>>> sync_cam;
   std::vector<std::shared_ptr<message_filters::Subscriber<sensor_msgs::Image>>> sync_subs_cam;
+
+  // GPS: datum (either fixed by the "gps_datum" param, or set from the first valid fix) and the ENU path
+  bool gps_datum_set = false;
+  double gps_datum_lat = 0.0, gps_datum_lon = 0.0, gps_datum_alt = 0.0;
+  /// Guards poses_enu, which -- unlike poses_imu -- is written and read from *different* threads:
+  /// callback_gps() appends to it while publish_gps() (called from visualize(), i.e. off
+  /// callback_inertial()) iterates it. run_subscribe_msckf.cpp spins an AsyncSpinner(0) over the
+  /// global callback queue, so those two callbacks genuinely run concurrently and a reallocating
+  /// push_back during iteration is undefined behavior.
+  std::mutex poses_enu_mtx;
+  std::vector<geometry_msgs::PoseStamped> poses_enu;
 
   // For path viz
   unsigned int poses_seq_imu = 0;

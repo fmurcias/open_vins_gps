@@ -159,6 +159,19 @@ int main(int argc, char **argv) {
 #endif
     }
 
+    // GPS: get the next simulated GPS fix if we have one (only produced if gps.enabled)
+    double time_gps;
+    Eigen::Vector3d meas_ENU;
+    Eigen::Matrix3d cov_gps;
+    bool hasgps = sim->get_next_gps(time_gps, meas_ENU, cov_gps);
+    if (hasgps) {
+      ov_core::GpsData message_gps;
+      message_gps.timestamp = time_gps;
+      message_gps.meas_ENU = meas_ENU;
+      message_gps.cov = cov_gps;
+      sys->feed_measurement_gps(message_gps);
+    }
+
     // CAM: get the next simulated camera uv measurements if we have them
     double time_cam;
     std::vector<int> camids;

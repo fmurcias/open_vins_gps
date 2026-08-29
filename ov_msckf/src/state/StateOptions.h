@@ -58,6 +58,11 @@ struct StateOptions {
   /// Bool to determine whether or not to calibrate the Gravity sensitivity
   bool do_calib_imu_g_sensitivity = false;
 
+  /// Bool to determine whether or not to calibrate the GPS antenna lever arm online
+  /// NOTE: this is only ever true if GPS is enabled (VioManager folds gps.enabled into this flag
+  /// before constructing the State, since StateOptions itself has no notion of "gps enabled")
+  bool do_calib_gps_leverarm = false;
+
   /// IMU intrinsic models
   enum ImuModel { KALIBR, RPNG };
 
@@ -162,6 +167,7 @@ struct StateOptions {
     PRINT_DEBUG("  - calib_cam_timeoffset: %d\n", do_calib_camera_timeoffset);
     PRINT_DEBUG("  - calib_imu_intrinsics: %d\n", do_calib_imu_intrinsics);
     PRINT_DEBUG("  - calib_imu_g_sensitivity: %d\n", do_calib_imu_g_sensitivity);
+    PRINT_DEBUG("  - calib_gps_leverarm: %d\n", do_calib_gps_leverarm);
     PRINT_DEBUG("  - imu_model: %d\n", imu_model);
     PRINT_DEBUG("  - max_clones: %d\n", max_clone_size);
     PRINT_DEBUG("  - max_slam: %d\n", max_slam_features);
