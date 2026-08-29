@@ -5,6 +5,7 @@
 > unchanged. With `gps_enabled: false` (the default) behaviour is identical to stock OpenVINS.
 
 ## GPS fusion
+**Currently functional but still WIP.**
 
 Stock OpenVINS is a visual-inertial estimator: accurate locally, but its global position and heading
 drift without bound, since neither is observable from a camera and an IMU alone. This fork feeds GNSS
