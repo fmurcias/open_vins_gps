@@ -1,4 +1,42 @@
-# OpenVINS
+# OpenVINS + GPS
+
+> **This is a fork of [rpng/open_vins](https://github.com/rpng/open_vins)** that adds GPS fusion to
+> the MSCKF filter. Everything below this section is the upstream project's documentation and is
+> unchanged. With `gps_enabled: false` (the default) behaviour is identical to stock OpenVINS.
+
+## GPS fusion
+
+Stock OpenVINS is a visual-inertial estimator: accurate locally, but its global position and heading
+drift without bound, since neither is observable from a camera and an IMU alone. This fork feeds GNSS
+fixes into the filter to bound that drift.
+
+The fusion is **loosely coupled** — the measurement is a `sensor_msgs/NavSatFix`, i.e. a PVT solution
+the receiver already computed, not raw pseudoranges — but it is **not cascaded**, which is how
+loosely-coupled fusion is usually built. Rather than running VIO and then aligning its output to GPS
+in a separate downstream pose graph (VINS-Fusion's GPS mode, `ov_secondary`), GPS updates the primary
+EKF directly:
+
+- **One state, one covariance**, shared with the visual and inertial updates. Because position is
+  correlated with velocity, orientation and the IMU biases, a fix corrects the states that *generate*
+  drift, not just the reported pose.
+- **No pose is ever interpolated.** When a fix arrives the filter propagates the real IMU state to its
+  exact timestamp, clones a stochastic pose there, runs a chi2-gated update, and marginalizes the
+  clone again.
+- **The ENU-to-global transform and the antenna lever arm are state variables**, delayed-initialized
+  once GPS geometry makes them observable and refined by every subsequent fix, rather than being
+  solved once offline.
+
+Also implemented: outage recovery via targeted covariance inflation (a long GPS gap otherwise leaves
+the filter too overconfident to accept the returning fix at all), automatic teardown and re-fit of the
+transform after a sustained rejection streak, and an evaluation harness with simulated outages.
+
+**[Design notes — the full derivation, measured results and tuning guidance](docs/gps-fusion.md)**
+· [Package usage and configuration](ov_msckf/README.md)
+· [Evaluation harness](ov_msckf/scripts/gps_eval/)
+
+---
+
+# OpenVINS (upstream)
 
 [![ROS 1 Workflow](https://github.com/rpng/open_vins/actions/workflows/build_ros1.yml/badge.svg)](https://github.com/rpng/open_vins/actions/workflows/build_ros1.yml)
 [![ROS 2 Workflow](https://github.com/rpng/open_vins/actions/workflows/build_ros2.yml/badge.svg)](https://github.com/rpng/open_vins/actions/workflows/build_ros2.yml)
