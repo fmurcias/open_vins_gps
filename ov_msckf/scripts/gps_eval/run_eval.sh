@@ -16,14 +16,27 @@
 # trajectory, and the estimator log. Nothing is shared between runs except the ground-truth file, so
 # results stay reproducible and self-documenting.
 #
-# Override via environment: BAG, BASE_CONFIG, OUT_ROOT, WS, GRACE_SECS.
+# Required environment (or set the variable of the same name directly):
+#   BAG          ROS2 bag directory containing IMU, camera(s) and a NavSatFix topic
+#   BASE_CONFIG  estimator config directory for that dataset (holds estimator_config.yaml)
+#   WS           colcon workspace with ov_msckf built (needs $WS/install/setup.bash)
+#   OUT_ROOT     where results are written
+# Optional: GRACE_SECS, REPEATS, RUN_TAG, GPS_TOPIC, POSE_TOPIC, PLAYBACK_RATE,
+#           DROPOUT_START, DROPOUT_LENGTHS (see below).
 # AI Generated
 set -euo pipefail
 
-BAG="${BAG:-$DATASET_DIR}"
-WS="${WS:-$WORKSPACE}"
-BASE_CONFIG="${BASE_CONFIG:-$WS/src/open_vins/config/fgi_masala}"
-OUT_ROOT="${OUT_ROOT:-$RESULTS_PATH}"
+BAG="${BAG:-${DATASET_DIR:-}}"
+WS="${WS:-${WORKSPACE:-}}"
+BASE_CONFIG="${BASE_CONFIG:-}"
+OUT_ROOT="${OUT_ROOT:-${RESULTS_PATH:-}}"
+# NavSatFix topic carrying the GNSS track used as ground truth (passed to make_gt.py).
+GPS_TOPIC="${GPS_TOPIC:-/imu/gnss}"
+# Topic the estimator publishes its pose on, which the recorder subscribes to. /poseimu is what
+# `ros2 run` gives (no namespace); see record_traj.py.
+POSE_TOPIC="${POSE_TOPIC:-/poseimu}"
+# Keep at 1.0 unless you know your QoS tolerates faster playback (see README).
+PLAYBACK_RATE="${PLAYBACK_RATE:-1.0}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Seconds to keep the estimator alive after playback ends, so it can finish anything still queued.
 GRACE_SECS="${GRACE_SECS:-8}"
@@ -36,14 +49,23 @@ RUN_TAG="${RUN_TAG:-}"
 
 # Variant table: NAME | gps_enabled | dropout_start | dropout_end
 # Dropout times are seconds relative to the FIRST GPS fix (see VioManager::feed_measurement_gps).
-# The bag is 242 s at ~3 m/s, so t+120 s onward covers 90 / 180 / 270 m of unaided VIO.
+# Pick DROPOUT_START and DROPOUT_LENGTHS to suit the bag: the outage should begin after the filter has
+# converged and end with enough bag left to observe re-convergence. Unaided distance is roughly
+# platform speed x outage length. Defaults suit a bag a few minutes long; set DROPOUT_LENGTHS="" to
+# run only the A/B variants.
+DROPOUT_START="${DROPOUT_START:-120}"
+DROPOUT_LENGTHS="${DROPOUT_LENGTHS-30 60 90}"
 VARIANTS=(
   "A_vio_only|false|-1|-1"
   "B_gps|true|-1|-1"
-  "C_dropout30|true|120|150"
-  "D_dropout60|true|120|180"
-  "E_dropout90|true|120|210"
 )
+# Dropout variants are lettered C, D, E, ... in the order given.
+letters=(C D E F G H I J K L)
+i=0
+for len in $DROPOUT_LENGTHS; do
+  VARIANTS+=("${letters[$i]}_dropout${len}|true|${DROPOUT_START}|$((DROPOUT_START + len))")
+  i=$((i + 1))
+done
 
 log() { printf '\033[1;36m[eval]\033[0m %s\n' "$*"; }
 die() { printf '\033[1;31m[eval] ERROR:\033[0m %s\n' "$*" >&2; exit 1; }
@@ -85,7 +107,7 @@ any_running() { [ -n "$(proc_pids "$1")" ]; }
 #      then wedges in teardown (the class_loader "attempting to unload library while objects created by
 #      this loader exist" warnings) with its worker threads parked. A bare `wait` blocks forever.
 #   2. `ros2 run` is a Python wrapper around the real binary. Signalling only the PID that bash reports
-#      can leave the child orphaned and running -- and an orphaned node KEEPS PUBLISHING on /poseimu,
+#      can leave the child orphaned and running -- and an orphaned node KEEPS PUBLISHING on the pose topic,
 #      so the next run's recorder interleaves two trajectories into one file. That produces a plausible
 #      looking file that is actually two runs zipped together.
 #
@@ -119,7 +141,7 @@ stop_recorder() {
   wait "$pid" 2>/dev/null || true
 }
 
-# Refuse to start on top of an existing node. This is not tidiness: a second publisher on /poseimu
+# Refuse to start on top of an existing node. This is not tidiness: a second publisher on the pose topic
 # corrupts the recording invisibly. Not auto-killed because a pre-existing node may be deliberate.
 preflight() {
   local pids
@@ -128,7 +150,7 @@ preflight() {
     printf '\033[1;31m[eval] ERROR:\033[0m an OpenVINS node or recorder is already running:\n' >&2
     # shellcheck disable=SC2086
     ps -o pid,etime,args -p $pids 2>/dev/null >&2 || true
-    printf '\nA second publisher on /poseimu silently interleaves two trajectories into one recording.\n' >&2
+    printf '\nA second publisher on the pose topic silently interleaves two trajectories into one recording.\n' >&2
     printf 'Stop it first:  pkill -f %s; pkill -f record_traj.py\n' "$ESTIMATOR_PAT" >&2
     exit 1
   fi
@@ -146,6 +168,10 @@ set_key() {
   fi
 }
 
+[ -n "$BAG" ] || die "BAG is not set (ROS2 bag directory)"
+[ -n "$WS" ] || die "WS is not set (colcon workspace)"
+[ -n "$BASE_CONFIG" ] || die "BASE_CONFIG is not set (estimator config directory)"
+[ -n "$OUT_ROOT" ] || die "OUT_ROOT is not set (results directory)"
 [ -d "$BAG" ] || die "bag not found: $BAG"
 [ -d "$BASE_CONFIG" ] || die "base config dir not found: $BASE_CONFIG"
 [ -f "$WS/install/setup.bash" ] || die "workspace not built: $WS/install/setup.bash"
@@ -172,7 +198,7 @@ make_gt() {
     datum_arg=(--datum "$datum")
     log "using fixed datum from config: $datum"
   fi
-  python3 "$SCRIPT_DIR/make_gt.py" "$BAG" "$GT_FILE" "${datum_arg[@]}"
+  python3 "$SCRIPT_DIR/make_gt.py" "$BAG" "$GT_FILE" --topic "$GPS_TOPIC" "${datum_arg[@]}"
 }
 
 run_variant() {
@@ -184,7 +210,7 @@ run_variant() {
   rm -rf "$out"
   mkdir -p "$out"
 
-  # Copy the whole config directory: estimator_config.yaml refers to the kalibr chains by *relative*
+  # Copy the whole config directory: estimator_config.yaml refers to the calibration files by *relative*
   # path (relative_config_imu / relative_config_imucam), so they have to travel with it.
   cp -r "$BASE_CONFIG/." "$out/config/"
   local cfg="$out/config/estimator_config.yaml"
@@ -206,7 +232,7 @@ run_variant() {
   # This is deliberate: the launch file unconditionally declares use_stereo / max_cameras /
   # save_total_state as node parameters, and YamlParser::parse_config() checks ROS parameters BEFORE
   # the YAML file -- so those launch defaults would silently override the config (notably
-  # use_stereo, which is false in this config but true in the launch file). run_subscribe_msckf sets
+  # use_stereo, whose launch-file default of true overrides a config that sets it to false). run_subscribe_msckf sets
   # automatically_declare_parameters_from_overrides(true), so only the parameters we actually pass on
   # the command line exist, and everything else comes from the config as written.
   # Started plainly, NOT under setsid: setsid forks when its caller is already a process-group leader,
@@ -218,10 +244,10 @@ run_variant() {
       > "$out/run.log" 2>&1 &
   local launch_pid=$!
 
-  # Topic is /poseimu because `ros2 run` applies no namespace and ROS2Visualizer publishes with
+  # Default topic is /poseimu because `ros2 run` applies no namespace and ROS2Visualizer publishes with
   # relative names. It would be /ov_msckf/poseimu under subscribe.launch.py. Passed explicitly so the
   # coupling to the launch method is visible here rather than buried in the recorder's default.
-  python3 "$SCRIPT_DIR/record_traj.py" "$out/traj_est.txt" --topic /poseimu > "$out/record.log" 2>&1 &
+  python3 "$SCRIPT_DIR/record_traj.py" "$out/traj_est.txt" --topic "$POSE_TOPIC" > "$out/record.log" 2>&1 &
   local rec_pid=$!
 
   # Let the node come up and subscribe before any data flows, otherwise the opening frames are lost.
@@ -232,17 +258,17 @@ run_variant() {
   # catches a stale node that preflight missed (e.g. one that appeared between the check and now), and
   # it is checked BEFORE playback so a corrupted run costs seconds rather than four minutes.
   local npub
-  npub="$(timeout 15 ros2 topic info /poseimu 2>/dev/null | sed -n 's/^Publisher count: //p')"
+  npub="$(timeout 15 ros2 topic info "$POSE_TOPIC" 2>/dev/null | sed -n 's/^Publisher count: //p')"
   if [ "${npub:-0}" != "1" ]; then
     stop_recorder "$rec_pid"
     stop_estimator
-    die "$name: expected exactly 1 publisher on /poseimu, found '${npub:-unknown}'. Two publishers interleave two trajectories into one recording."
+    die "$name: expected exactly 1 publisher on $POSE_TOPIC, found '${npub:-unknown}'. Two publishers interleave two trajectories into one recording."
   fi
 
-  log "$name: playing bag (~4 min, real time)"
-  # Do NOT raise the playback rate. Subscriptions use SensorDataQoS (best-effort, shallow queue), so
-  # playing faster drops frames non-deterministically and makes runs incomparable.
-  ros2 bag play "$BAG" --rate 1.0 >> "$out/run.log" 2>&1
+  log "$name: playing bag at rate $PLAYBACK_RATE"
+  # Do not raise the playback rate above 1.0. Subscriptions use SensorDataQoS (best-effort, shallow
+  # queue), so playing faster drops frames non-deterministically and makes runs incomparable.
+  ros2 bag play "$BAG" --rate "$PLAYBACK_RATE" >> "$out/run.log" 2>&1
 
   log "$name: playback done, ${GRACE_SECS}s grace for queued frames"
   sleep "$GRACE_SECS"

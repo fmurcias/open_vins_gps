@@ -17,8 +17,10 @@ The Loader wants the *orientation* upper-triangle (Pr) first and the *position* 
 second. Getting this backwards does not fail loudly -- it silently corrupts NEES -- so the mapping is
 done explicitly below.
 
-Timestamps need no correction: publish_state() stamps with state->_timestamp + calib_dt_CAMtoIMU (IMU
-clock) and gps_toff is 0 for this dataset, so estimate and GNSS ground truth share a clock.
+Timestamps are not corrected: publish_state() stamps with state->_timestamp + calib_dt_CAMtoIMU (IMU
+clock). This assumes the estimate and the GNSS ground truth share a clock, i.e. gps_toff is 0 (or
+already accounted for) in the config. If your GNSS stamps are offset from the IMU clock, fix that in
+the config or the ground-truth file, otherwise every error figure carries the offset.
 
 TOPIC NAMING -- the default is `/poseimu`, NOT `/ov_msckf/poseimu`. ROS2Visualizer creates its
 publishers with relative names ("poseimu"), so the resolved topic depends entirely on how the node was

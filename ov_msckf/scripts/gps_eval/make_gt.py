@@ -2,8 +2,8 @@
 """
 Build an ov_eval-format ground-truth trajectory from the GNSS track in a ROS2 bag.
 
-The GNSS fixes are the only absolute position reference available for this dataset, so they serve as
-ground truth. Read the caveat in README.md before interpreting anything: scoring a *GPS-fused* run
+For datasets with no dedicated ground truth, the GNSS fixes are the only absolute position reference
+available, so they serve as ground truth. Read the caveat in README.md before interpreting anything: scoring a *GPS-fused* run
 against this file is circular. It is honest ground truth for a VIO-only run, and for the outage
 window of a dropout run (where the filter never saw these fixes).
 
@@ -120,9 +120,9 @@ def main():
         for t, e in rows:
             f.write("%.9f %.6f %.6f %.6f 0.0 0.0 0.0 1.0\n" % (t, e[0], e[1], e[2]))
 
-    # Report the same figures the plan recorded from the bag. If these drift, the ENU conversion or the
-    # datum is wrong and every downstream error number is wrong with it -- so this is a real check, not
-    # decoration.
+    # Print summary statistics so the conversion can be sanity-checked. Compare them against what you
+    # know of the dataset (duration, rough path length, whether the route is a loop). If they look
+    # wrong, the ENU conversion or the datum is wrong and every downstream error number is wrong with it.
     pts = [r[1] for r in rows]
     path = sum(math.dist(pts[i], pts[i - 1]) for i in range(1, len(pts)))
     dur = rows[-1][0] - rows[0][0]

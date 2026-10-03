@@ -32,7 +32,9 @@ import sys
 
 import numpy as np
 
-RUN_ORDER = ["A_vio_only", "B_gps", "C_dropout30", "D_dropout60", "E_dropout90"]
+# Runs listed here come first in the report; any other run directory is appended in sorted order, so
+# custom variants (other outage lengths, repeats, tagged re-runs) need no change here.
+RUN_ORDER = ["A_vio_only", "B_gps"]
 
 
 def load_traj(path):
@@ -84,10 +86,10 @@ def stats(err):
 
 
 # Settings that invalidate a cross-run comparison if they differ. The estimator-side keys are here
-# because leaving them out already caused a wrong conclusion once: an A_vio_only cohort was re-run with
-# both max_cameras 2->1 and calib_imu_intrinsics on->off, and the resulting 17% ATE change was read as
-# the cost of the calibration change when halving the camera count is the likelier cause. Two variables
-# moved and nothing said so. Anything that changes what the filter is doing belongs in this list.
+# because leaving them out invites wrong conclusions: if a cohort is re-run with two settings changed at
+# once (say camera count and IMU calibration), the resulting ATE change gets credited to one of them
+# and nothing says two variables moved. Anything that changes what the filter is doing belongs in this
+# list; add keys for any other setting you vary between runs.
 CFG_KEYS = ["gps_enabled", "gps_noise_floor", "gps_chi2_multipler", "gps_do_calib_leverarm",
             "gps_gap_threshold_secs", "gps_gap_drift_rate", "gps_gap_max_sigma",
             "gps_dropout_start_secs", "gps_dropout_end_secs",
@@ -119,10 +121,11 @@ def read_cfg(rundir):
     return out
 
 
-# A healthy filter touches the IMU biases on essentially every camera frame. Measured over 33 runs, the
-# longest stretch of frames with a bit-identical bias was 281 in a healthy run and 1892/2401/3134 in the
-# three that failed -- a clean separation. 500 frames (~32s at this bag's ~15.8 Hz) sits ~1.8x above the
-# worst healthy run and ~3.8x below the best failure.
+# A healthy filter touches the IMU biases on essentially every camera frame, so a long stretch of
+# frames with a bit-identical bias means no update is passing. This threshold is empirical: it was
+# chosen to sit well above the longest freeze seen in healthy runs and well below those seen in failed
+# runs on the development data. It is counted in frames, so it scales with camera rate -- on a
+# different dataset, check the "max freeze" column for known-good runs and adjust with --freeze-frames.
 FREEZE_FRAMES = 500
 
 
@@ -190,10 +193,10 @@ def vio_health(ba_seq):
     plausible-looking pose. It is silent -- no warning, no error, and the run completes with a normal
     pose count -- which is exactly why it needs detecting mechanically.
 
-    Observed once as a 31 km trajectory error: the bias froze at |ba| = 1.53 m/s^2 for ~200 s, and
-    0.5 * 1.53 * 200^2 = 30.6 km accounts for essentially all of the 31.6 km of measured loop drift.
+    The cost is enormous: a frozen accelerometer bias of b m/s^2 over T seconds integrates to
+    0.5 * b * T^2 metres of position error (1.5 m/s^2 over 200 s is ~30 km).
 
-    Note that |ba| itself is NOT a usable discriminator -- it transiently reaches ~1.2 m/s^2 during
+    Note that |ba| itself is NOT a usable discriminator -- it can transiently reach large values during
     early convergence in healthy runs too. Only the *freeze* separates cleanly.
     """
     out = dict(prints=len(ba_seq), distinct=len(set(ba_seq)), max_freeze=0, freeze_start=None,
@@ -233,8 +236,9 @@ def analyze_run(name, root, t_gt, p_gt):
     err_h = np.linalg.norm(pe_al[:, :2] - pg[:, :2], axis=1)
     err_v = np.abs(pe_al[:, 2] - pg[:, 2])
 
-    # Loop closure: the platform returns to within 0.74 m / -0.97 m of its start per GNSS, so how far
-    # the *estimate* drifts over the same loop is a fusion-independent read on accumulated drift.
+    # Loop closure: if the platform ends near where it started (compare loop_gt, the GNSS start-to-end
+    # distance), how far the *estimate* is from its own start is a fusion-independent read on
+    # accumulated drift. Only meaningful when loop_gt is small, i.e. the trajectory is a closed loop.
     est_loop = np.linalg.norm(pe_al[-1] - pe_al[0])
     gt_loop = np.linalg.norm(pg[-1] - pg[0])
 
@@ -256,13 +260,11 @@ def analyze_run(name, root, t_gt, p_gt):
             # Recovery threshold: the pre-outage 90th percentile, i.e. the top of this run's own normal
             # error band.
             #
-            # NOT 1.5x the pre-outage median, which is what this used to be. That penalised accuracy: a
-            # run with an unusually tight pre-outage segment set itself an unreachably low bar and was
-            # reported as recovering slowly even when its post-outage error was the lowest in the cohort.
-            # It ranked C_dropout30_C_no_calib_run3 -- best ATE of its group (1.18 m) and lowest
-            # post-outage error of any C run (1.63 m) -- as taking 16.2s to recover, purely because its
-            # median was 1.06 m instead of ~1.6 m. Using a percentile of the same distribution tracks how
-            # much that run actually varies, so the bar scales with its noise rather than its skill.
+            # Deliberately NOT a multiple of the pre-outage median. That penalises accuracy: a run with
+            # an unusually tight pre-outage segment sets itself an unreachably low bar and is reported
+            # as recovering slowly even when its post-outage error is the lowest in the cohort. A
+            # percentile of the same distribution tracks how much the run actually varies, so the bar
+            # scales with its noise rather than its skill.
             recov_thresh = float(np.percentile(pre, 90)) if len(pre) else float("nan")
             r["dropout"] = dict(
                 start=ds, end=de, secs=de - ds,
@@ -272,9 +274,9 @@ def analyze_run(name, root, t_gt, p_gt):
             )
             # First post-outage sample that returns under that band AND stays under it. "Stays" is
             # deliberately for the whole remainder rather than a sliding window: a run that dips back
-            # briefly and then degrades again has not recovered, and a window short enough to be
-            # forgiving turns D_dropout60_run2 -- which genuinely never re-converged -- into "8.2s".
-            # "Never" is itself a result worth reporting.
+            # briefly and then degrades again has not recovered, and a forgiving window would report a
+            # run that never re-converged as having recovered quickly. "Never" is itself a result
+            # worth reporting.
             recov = None
             if len(post) and not math.isnan(recov_thresh):
                 t_post = ta[ta > de]
@@ -300,14 +302,13 @@ def split_invalid(results):
     Two distinct failures, both of which silently corrupt a comparison:
 
     *Truncated* -- the run ended early. It still writes a short but well-formed trajectory, and scoring
-    it produces a *flattering* number, because a 30-second fragment has barely had time to drift. A
-    segfaulted 32-pose run scored 0.55 m and became the best `E_dropout90` result in the spread table.
+    it produces a *flattering* number, because a short fragment has barely had time to drift. A crashed
+    run with a few dozen poses can easily become the "best" result in a spread table.
     The test must be cohort-relative: no absolute pose count is simultaneously "too short to score" and
     "short enough that a healthy run never hits it".
 
     *Frozen* -- the run completed with a full pose count but the filter stopped updating partway
-    through (see vio_health). Two such runs scored 10.9 km and 15.6 km and made the C_dropout30 spread
-    read as 15,580 m.
+    through (see vio_health). Such runs score errors of kilometres and swamp any spread statistic.
 
     Both tests are on the *mechanism*, never on the ATE. Excluding runs because their error looks bad
     would silently hide exactly the regressions this script exists to find; excluding them because the
@@ -396,7 +397,7 @@ def report(results, invalid, cohort_median, cutoff, root):
     w("`max freeze` is the longest run of consecutive camera frames over which the accelerometer bias")
     w("did not move at all -- i.e. no visual update passed the chi2 gate. Healthy runs sit in the tens;")
     w("anything approaching %d means the filter was dead-reckoning. `final |ba|` is context, not a" % FREEZE_FRAMES)
-    w("verdict: it transiently reaches ~1.2 m/s2 during early convergence in healthy runs too.\n")
+    w("verdict: it can transiently reach large values during early convergence in healthy runs too.\n")
     w("| run | frames | bias updates | max freeze | final \\|ba\\| | verdict |")
     w("|---|---|---|---|---|---|")
     for r in sorted(results + invalid, key=lambda x: x["name"]):
@@ -517,10 +518,15 @@ def make_plots(results, root):
 
 
 def main():
+    global FREEZE_FRAMES
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("root", help="results root (OUT_ROOT from run_eval.sh)")
     ap.add_argument("--no-plots", action="store_true")
+    ap.add_argument("--freeze-frames", type=int, default=FREEZE_FRAMES,
+                    help="consecutive frames with an unchanged accelerometer bias that mark a frozen "
+                         "filter (default %(default)s; scales with camera rate)")
     args = ap.parse_args()
+    FREEZE_FRAMES = args.freeze_frames
 
     gt_path = os.path.join(args.root, "groundtruth.txt")
     if not os.path.isfile(gt_path):
