@@ -9,6 +9,7 @@ find_package(std_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
+find_package(geographic_msgs REQUIRED)
 find_package(cv_bridge REQUIRED)
 find_package(image_transport REQUIRED)
 find_package(ov_core REQUIRED)
@@ -41,6 +42,7 @@ list(APPEND ament_libraries
         tf2_geometry_msgs
         std_msgs
         geometry_msgs
+        geographic_msgs
         sensor_msgs
         nav_msgs
         cv_bridge

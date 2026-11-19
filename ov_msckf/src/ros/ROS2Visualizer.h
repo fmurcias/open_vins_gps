@@ -44,6 +44,7 @@
 #include <tf2/transform_datatypes.h>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 #include <tf2_ros/transform_broadcaster.h>
+#include <geographic_msgs/msg/geo_point_stamped.hpp>
 
 #include <atomic>
 #include <fstream>
@@ -168,6 +169,7 @@ protected:
   typedef message_filters::sync_policies::ApproximateTime<sensor_msgs::msg::Image, sensor_msgs::msg::Image> sync_pol;
   std::vector<std::shared_ptr<message_filters::Synchronizer<sync_pol>>> sync_cam;
   std::vector<std::shared_ptr<message_filters::Subscriber<sensor_msgs::msg::Image>>> sync_subs_cam;
+  rclcpp::Subscription<geographic_msgs::msg::GeoPointStamped>::SharedPtr sub_origin;
 
   // For path viz
   std::vector<geometry_msgs::msg::PoseStamped> poses_imu;
@@ -175,6 +177,7 @@ protected:
   // GPS: datum (either fixed by the "gps_datum" param, or set from the first valid fix), ENU path publisher/path
   rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pub_pathenu;
   bool gps_datum_set = false;
+  int gps_datum_source = 0;
   double gps_datum_lat = 0.0, gps_datum_lon = 0.0, gps_datum_alt = 0.0;
   /// Guards poses_enu, which -- unlike poses_imu -- is written by callback_gps() and read by
   /// publish_gps() (called from visualize(), i.e. off callback_inertial()). Today rclcpp puts both

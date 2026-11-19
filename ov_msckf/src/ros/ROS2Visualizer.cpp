@@ -232,15 +232,45 @@ void ROS2Visualizer::setup_subscribers(std::shared_ptr<ov_core::YamlParser> pars
         topic_gps, rclcpp::SensorDataQoS(), std::bind(&ROS2Visualizer::callback_gps, this, std::placeholders::_1));
     PRINT_INFO("subscribing to GPS: %s\n", topic_gps.c_str());
 
-    // Optional fixed datum (lat, lon, alt in degrees/meters); if not given we use the first valid fix
-    std::vector<double> gps_datum;
-    parser->parse_config("gps_datum", gps_datum, false);
-    if (gps_datum.size() == 3) {
-      gps_datum_lat = gps_datum.at(0);
-      gps_datum_lon = gps_datum.at(1);
-      gps_datum_alt = gps_datum.at(2);
-      gps_datum_set = true;
-      PRINT_INFO("using fixed GPS datum: lat=%.8f, lon=%.8f, alt=%.3f\n", gps_datum_lat, gps_datum_lon, gps_datum_alt);
+    parser->parse_config("gps_datum_source", gps_datum_source, 0);
+    PRINT_INFO("gps_datum_source: %d\n", gps_datum_source);
+
+    if (gps_datum_source == 0) {
+      // Optional fixed datum (lat, lon, alt in degrees/meters); if not given we use the first valid fix
+      std::vector<double> gps_datum;
+      parser->parse_config("gps_datum", gps_datum, false);
+      if (gps_datum.size() == 3) {
+        gps_datum_lat = gps_datum.at(0);
+        gps_datum_lon = gps_datum.at(1);
+        gps_datum_alt = gps_datum.at(2);
+        gps_datum_set = true;
+        PRINT_INFO("using fixed GPS datum: lat=%.8f, lon=%.8f, alt=%.3f\n", gps_datum_lat, gps_datum_lon, gps_datum_alt);
+      }else{
+        gps_datum_source = 2; // use first valid fix as datum
+        PRINT_INFO("no fixed GPS datum provided or it is not correct, will use first valid fix\n");
+      }
+    } else if (gps_datum_source==1){
+      std::string datum_topic = "/ap/gps_global_origin/filtered";
+      parser->parse_config("datum_topic", datum_topic, false);
+      sub_origin = _node->create_subscription<geographic_msgs::msg::GeoPointStamped>(
+        datum_topic, rclcpp::SensorDataQoS(),   // AP publishes best-effort: matches
+        [this](const geographic_msgs::msg::GeoPointStamped::SharedPtr m) {
+          if (gps_datum_set) return;                     // EKF origin is fixed once set
+          const auto &p = m->position;
+          // AP publishes this topic before the EKF origin exists, with lat/lon left at 0
+          if ((p.latitude == 0.0 && p.longitude == 0.0) || std::abs(p.latitude) > 90.0 || std::abs(p.longitude) > 180.0) {
+            return;
+          }
+          gps_datum_lat = p.latitude;
+          gps_datum_lon = p.longitude;
+          gps_datum_alt = p.altitude;                    // AMSL, same as /ap/navsat
+          gps_datum_set = true;                          // write last
+          PRINT_INFO(GREEN "[GPS]: datum = AP EKF origin: lat=%.8f, lon=%.8f, alt=%.3f\n" RESET,
+                    gps_datum_lat, gps_datum_lon, gps_datum_alt);
+          sub_origin.reset();
+        });
+    }else{
+      // Datum set from first GPS position received
     }
   }
 }
@@ -536,13 +566,18 @@ void ROS2Visualizer::callback_gps(const sensor_msgs::msg::NavSatFix::SharedPtr m
   }
 
   // Datum = first valid fix, unless fixed by the "gps_datum" config parameter (see setup_subscribers)
-  if (!gps_datum_set) {
+  if (!gps_datum_set && gps_datum_source == 2) {
     gps_datum_lat = msg->latitude;
     gps_datum_lon = msg->longitude;
     gps_datum_alt = msg->altitude;
     gps_datum_set = true;
     PRINT_INFO(GREEN "[GPS]: datum set from first valid fix: lat=%.8f, lon=%.8f, alt=%.3f\n" RESET, gps_datum_lat, gps_datum_lon,
                gps_datum_alt);
+  }
+
+  if(!gps_datum_set && gps_datum_source == 1) {
+    PRINT_WARNING(YELLOW "[GPS]: waiting for datum from topic\n" RESET);
+    return;
   }
 
   // Convert LLA (WGS84) -> local ENU using our datum
